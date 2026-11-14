@@ -8,6 +8,9 @@ import android.media.SoundPool
 class Sfx(ctx: Context) {
     var enabled = true
 
+    /** Which screen-switch sound to use; an index into [TAB_SOUNDS]. */
+    var tabSound = 0
+
     private val pool = SoundPool.Builder()
         .setMaxStreams(4)
         .setAudioAttributes(
@@ -18,7 +21,7 @@ class Sfx(ctx: Context) {
         )
         .build()
 
-    private val tab = load(ctx, "tab")
+    private val tabs = TAB_SOUNDS.map { load(ctx, "tab_" + it.lowercase()) }
     private val tick = load(ctx, "tick")
     private val select = load(ctx, "select")
     private val back = load(ctx, "back")
@@ -34,7 +37,7 @@ class Sfx(ctx: Context) {
         if (enabled && id != 0) pool.play(id, vol, vol, 1, 0, rate)
     }
 
-    fun tab() = play(tab, 1f)
+    fun tab() = play(tabs[tabSound.coerceIn(0, tabs.size - 1)], 1f)
     fun select() = play(select, 0.9f)
     fun back() = play(back, 0.9f)
 
@@ -50,4 +53,8 @@ class Sfx(ctx: Context) {
     }
 
     fun release() = pool.release()
+
+    companion object {
+        val TAB_SOUNDS = arrayOf("KNOB", "THOCK", "RELAY", "CLASSIC")
+    }
 }

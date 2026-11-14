@@ -109,6 +109,23 @@ class Prefs(ctx: Context) {
     var icons: Boolean
         get() = sp.getBoolean("icons", true)
         set(v) = sp.edit().putBoolean("icons", v).apply()
+    var tabSound: Int
+        get() = sp.getInt("tab_sound", 0)
+        set(v) = sp.edit().putInt("tab_sound", v).apply()
+    var hideStatusBar: Boolean
+        get() = sp.getBoolean("hide_status", true)
+        set(v) = sp.edit().putBoolean("hide_status", v).apply()
+    var radioBand: Int
+        get() = sp.getInt("radio_band", 3)
+        set(v) = sp.edit().putInt("radio_band", v).apply()
+    var askedNotify: Boolean
+        get() = sp.getBoolean("asked_notify", false)
+        set(v) = sp.edit().putBoolean("asked_notify", v).apply()
+
+    /** Last station list fetched for a radio band, as "name\turl\tnote" lines. */
+    fun stations(band: Int): String = sp.getString("stations_$band", "")!!
+    fun saveStations(band: Int, v: String) = sp.edit().putString("stations_$band", v).apply()
+
     var favsSeeded: Boolean
         get() = sp.getBoolean("favs_seeded", false)
         set(v) = sp.edit().putBoolean("favs_seeded", v).apply()

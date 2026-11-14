@@ -2,11 +2,13 @@ package com.hetuoo.phosphor
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.LauncherApps
+import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -22,6 +24,8 @@ import android.os.Process
 import android.os.StatFs
 import android.os.SystemClock
 import android.os.UserHandle
+import android.provider.AlarmClock
+import android.provider.CalendarContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.Editable
@@ -37,6 +41,8 @@ import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
@@ -71,6 +77,16 @@ class MainActivity : Activity() {
     private lateinit var appList: ListView
     private lateinit var appCount: TextView
     private lateinit var search: EditText
+    private lateinit var homeRadio: TextView
+    private lateinit var radioName: TextView
+    private lateinit var radioStatus: TextView
+    private lateinit var radioVu: VuView
+    private lateinit var bandBar: TabBar
+    private lateinit var bandHead: TextView
+    private lateinit var stationList: ListView
+    private var stations: List<Station> = emptyList()
+    private var band = 0
+    private val fetched = HashSet<Int>()
     private lateinit var scope: ScopeView
     private lateinit var gPower: GaugeView
     private lateinit var gMem: GaugeView
@@ -99,7 +115,10 @@ class MainActivity : Activity() {
             Icons.cache.clear()
             Icons.cacheColor = Term.fg
         }
-        sfx = Sfx(this).apply { enabled = prefs.sound }
+        sfx = Sfx(this).apply {
+            enabled = prefs.sound
+            tabSound = prefs.tabSound
+        }
         launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
 
         buildUi()
@@ -108,8 +127,11 @@ class MainActivity : Activity() {
 
         launcherApps.registerCallback(appsChanged)
         loadApps()
+        Radio.listener = ::showRadioState
+        showRadioState()
+        showBand(prefs.radioBand.coerceIn(0, Radio.BANDS.size - 1))
 
-        val startTab = pendingTab
+        val startTab = if (intent?.getBooleanExtra(RadioService.EXTRA_SHOW_RADIO, false) == true) RADIO else pendingTab
         pendingTab = HOME
         if (startTab != HOME) setTab(startTab, sound = false) else sfx.bootWhenReady()
     }
@@ -124,6 +146,7 @@ class MainActivity : Activity() {
         resumed = true
         overlay.running = true
         scope.running = tab == STAT
+        radioVu.running = tab == RADIO && Radio.state == Radio.ON_AIR
         val f = IntentFilter().apply {
             addAction(Intent.ACTION_TIME_TICK)
             addAction(Intent.ACTION_TIME_CHANGED)
@@ -142,6 +165,7 @@ class MainActivity : Activity() {
         resumed = false
         overlay.running = false
         scope.running = false
+        radioVu.running = false
         unregisterReceiver(ticker)
         ui.removeCallbacks(blink)
         ui.removeCallbacks(statTick)
@@ -150,6 +174,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         loadGen++
+        if (Radio.listener == ::showRadioState) Radio.listener = null
         launcherApps.unregisterCallback(appsChanged)
         sfx.release()
     }
@@ -158,7 +183,13 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         closeMenu()
-        if (tab != HOME) setTab(HOME)
+        val target = if (intent.getBooleanExtra(RadioService.EXTRA_SHOW_RADIO, false)) RADIO else HOME
+        if (tab != target) setTab(target)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyBars()
     }
 
     @Deprecated("Deprecated in Java")
@@ -185,6 +216,13 @@ class MainActivity : Activity() {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
+        if (Build.VERSION.SDK_INT >= 28) {
+            // Let the picture run up behind a camera cutout; the content still keeps clear of it.
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        applyBars()
         // The CRT overlay covers the whole glass; the content keeps clear of bars and keyboard.
         root.setOnApplyWindowInsetsListener { _, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
@@ -204,6 +242,25 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Hides (or restores) the system status bar. A swipe from the top edge peeks at it. */
+    private fun applyBars() {
+        val hide = prefs.hideStatusBar
+        if (Build.VERSION.SDK_INT >= 30) {
+            val c = window.insetsController ?: return
+            if (hide) {
+                c.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                c.hide(WindowInsets.Type.statusBars())
+            } else {
+                c.show(WindowInsets.Type.statusBars())
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                if (hide) View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY else 0
+        }
+    }
+
     // ---------------------------------------------------------------- UI construction
 
     private fun buildUi() {
@@ -212,12 +269,12 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             isFocusableInTouchMode = true
         }
-        tabBar = TabBar(this, arrayOf("HOME", "APPS", "STAT", "CONF")).apply {
+        tabBar = TabBar(this, arrayOf("HOME", "APPS", "RADIO", "STAT", "CONF"), 25f).apply {
             onSelect = { setTab(it) }
         }
         content.addView(tabBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        pages = listOf(buildHome(), buildApps(), buildStat(), buildConf())
+        pages = listOf(buildHome(), buildApps(), buildRadio(), buildStat(), buildConf())
         val holder = FrameLayout(this)
         pages.forEachIndexed { i, p ->
             p.visibility = if (i == HOME) View.VISIBLE else View.GONE
@@ -249,8 +306,28 @@ class MainActivity : Activity() {
     }
 
     private fun buildHome(): View = column().apply {
-        clock = ClockView(context)
+        clock = ClockView(context).apply {
+            onZone = { zone ->
+                sfx.select()
+                haptic()
+                when (zone) {
+                    ClockView.TIME -> openClock()
+                    ClockView.DATE -> open(Intent(Intent.ACTION_VIEW, ContentUris.withAppendedId(
+                        CalendarContract.CONTENT_URI.buildUpon().appendPath("time").build(),
+                        System.currentTimeMillis())))
+                    else -> open(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
+                }
+            }
+        }
         addView(clock, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        homeRadio = Term.text(context, "", 22f).apply {
+            setPadding(px(18f), px(8f), px(18f), px(8f))
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            visibility = View.GONE
+            setOnClickListener { setTab(RADIO) }
+        }
+        addView(homeRadio, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         addView(heading("// FAVORITES"))
 
         favList = termList().apply {
@@ -340,6 +417,69 @@ class MainActivity : Activity() {
         })
     }
 
+    private fun buildRadio(): View = column().apply {
+        addView(heading("// RECEIVER"))
+        radioName = Term.text(context, "", 27f).apply {
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        radioStatus = Term.text(context, "", 22f, Term.shade(0.6f)).apply {
+            setShadowLayer(0f, 0f, 0f, 0)
+            setPadding(0, px(4f), 0, px(10f))
+        }
+        radioVu = VuView(context)
+        val panel = column().apply {
+            background = Term.border()
+            setPadding(px(14f), px(12f), px(14f), px(14f))
+            addView(radioName)
+            addView(radioStatus)
+            addView(radioVu)
+            // Tap the receiver to stop, or to retune the last station.
+            setOnClickListener {
+                haptic()
+                val s = Radio.current
+                when {
+                    Radio.state == Radio.TUNING || Radio.state == Radio.ON_AIR -> {
+                        sfx.back()
+                        RadioService.stop(this@MainActivity)
+                    }
+                    s != null -> tune(s)
+                }
+            }
+        }
+        addView(panel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            setMargins(px(14f), px(2f), px(14f), px(6f))
+        })
+
+        bandBar = TabBar(context, Radio.BANDS, 24f, 50f).apply {
+            onSelect = {
+                if (it != band) {
+                    sfx.tick()
+                    haptic()
+                    showBand(it)
+                }
+            }
+        }
+        addView(bandBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        bandHead = heading("")
+        addView(bandHead)
+
+        stationList = termList().apply {
+            adapter = stationAdapter
+            setOnItemClickListener { _, _, pos, _ ->
+                val s = stations[pos]
+                val live = Radio.state == Radio.TUNING || Radio.state == Radio.ON_AIR
+                if (live && Radio.current?.url == s.url) {
+                    sfx.back()
+                    RadioService.stop(this@MainActivity)
+                } else {
+                    tune(s)
+                }
+            }
+        }
+        addView(stationList, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+    }
+
     private fun buildStat(): View {
         val col = column()
         col.addView(heading("// SIGNAL"))
@@ -349,6 +489,14 @@ class MainActivity : Activity() {
         gPower = GaugeView(this, "POWER")
         gMem = GaugeView(this, "MEMORY")
         gDisk = GaugeView(this, "STORAGE")
+        gPower.setOnClickListener {
+            sfx.select()
+            open(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
+        }
+        gDisk.setOnClickListener {
+            sfx.select()
+            open(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))
+        }
         col.addView(gPower)
         col.addView(gMem)
         col.addView(gDisk)
@@ -407,6 +555,11 @@ class MainActivity : Activity() {
             overlay.invalidate()
             fillConf()
         }
+        row("STATUS BAR", if (prefs.hideStatusBar) "[HIDDEN]" else "[SHOWN]") {
+            prefs.hideStatusBar = !prefs.hideStatusBar
+            applyBars()
+            fillConf()
+        }
         row("PROGRAM ICONS", onOff(prefs.icons)) {
             prefs.icons = !prefs.icons
             favAdapter.notifyDataSetChanged()
@@ -420,6 +573,12 @@ class MainActivity : Activity() {
             sfx.tab()
             fillConf()
         }
+        row("SWITCH SOUND", "[${Sfx.TAB_SOUNDS[prefs.tabSound.coerceIn(0, Sfx.TAB_SOUNDS.size - 1)]}]") {
+            prefs.tabSound = (prefs.tabSound + 1) % Sfx.TAB_SOUNDS.size
+            sfx.tabSound = prefs.tabSound
+            sfx.tab()
+            fillConf()
+        }
         row("HAPTICS", onOff(prefs.haptics)) {
             prefs.haptics = !prefs.haptics
             fillConf()
@@ -427,7 +586,7 @@ class MainActivity : Activity() {
         conf.addView(heading("// SYSTEM"))
         row("SET AS HOME SCREEN", ">") { open(Intent(Settings.ACTION_HOME_SETTINGS)) }
         row("DEVICE SETTINGS", ">") { open(Intent(Settings.ACTION_SETTINGS)) }
-        conf.addView(heading("PHOSPHOR TERMINAL V1.0"))
+        conf.addView(heading("PHOSPHOR TERMINAL V1.1"))
     }
 
     // ---------------------------------------------------------------- navigation
@@ -458,6 +617,7 @@ class MainActivity : Activity() {
             haptic()
         }
         scope.running = resumed && i == STAT
+        radioVu.running = resumed && i == RADIO && Radio.state == Radio.ON_AIR
         ui.removeCallbacks(statTick)
         if (i == STAT) ui.post(statTick)
     }
@@ -676,6 +836,106 @@ class MainActivity : Activity() {
         ))
     }
 
+    // ---------------------------------------------------------------- radio
+
+    private fun openClock() {
+        try {
+            startActivity(Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        } catch (e: Exception) {
+            // No app answers the standard request; fall back to the usual clock apps by name.
+        }
+        for (pkg in listOf("com.google.android.deskclock", "com.android.deskclock", "com.sec.android.app.clockpackage")) {
+            val i = packageManager.getLaunchIntentForPackage(pkg) ?: continue
+            open(i)
+            return
+        }
+    }
+
+    private fun tune(s: Station) {
+        sfx.select()
+        haptic()
+        // Android 13+ only shows the playback notification (with its Stop button) if allowed.
+        if (Build.VERSION.SDK_INT >= 33 && !prefs.askedNotify &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            prefs.askedNotify = true
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        try {
+            RadioService.play(this, s)
+        } catch (e: Exception) {
+            Radio.set(Radio.FAILED, s)
+        }
+    }
+
+    private fun showRadioState() {
+        val s = Radio.current
+        val live = Radio.state == Radio.TUNING || Radio.state == Radio.ON_AIR
+        radioName.text = s?.name ?: "NO STATION"
+        radioStatus.text = when (Radio.state) {
+            Radio.TUNING -> "TUNING..."
+            Radio.ON_AIR -> "ON AIR - TAP TO STOP"
+            Radio.FAILED -> "NO SIGNAL - TAP TO RETRY"
+            else -> if (s == null) "PICK A STATION BELOW" else "STOPPED - TAP TO PLAY"
+        }
+        radioVu.running = resumed && tab == RADIO && Radio.state == Radio.ON_AIR
+        homeRadio.visibility = if (live) View.VISIBLE else View.GONE
+        homeRadio.text = (if (Radio.state == Radio.ON_AIR) "ON AIR: " else "TUNING: ") + (s?.name ?: "")
+        stationAdapter.notifyDataSetChanged()
+    }
+
+    /** Shows a decade's stations: presets and the last saved list at once, then a fresh scan. */
+    private fun showBand(i: Int) {
+        band = i
+        prefs.radioBand = i
+        bandBar.selected = i
+        setStations(i, Radio.decode(prefs.stations(i)))
+        stationList.setSelection(0)
+        if (i in fetched) return
+        bandHead.text = "// ${Radio.BANDS[i]} - SCANNING..."
+        thread(name = "radio") {
+            val found = Radio.fetch(i)
+            runOnUiThread {
+                if (found != null && found.isNotEmpty()) {
+                    fetched.add(i)
+                    prefs.saveStations(i, Radio.encode(found))
+                }
+                if (band == i && !isDestroyed) {
+                    setStations(i, found ?: Radio.decode(prefs.stations(i)))
+                    if (found == null) bandHead.text = "// ${Radio.BANDS[i]} - ${stations.size} STATIONS (OFFLINE)"
+                }
+            }
+        }
+    }
+
+    private fun setStations(i: Int, directory: List<Station>) {
+        val presetUrls = Radio.presets[i].map { it.url }.toSet()
+        stations = Radio.presets[i] + directory.filter { it.url !in presetUrls }
+        bandHead.text = "// ${Radio.BANDS[i]} - ${stations.size} STATIONS"
+        stationAdapter.notifyDataSetChanged()
+    }
+
+    private inner class StationAdapter : BaseAdapter() {
+        override fun getCount() = stations.size
+        override fun getItem(position: Int) = stations[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val row = convertView as? RowView ?: RowView(this@MainActivity)
+            val s = stations[position]
+            val note = if (Radio.current?.url == s.url) when (Radio.state) {
+                Radio.ON_AIR -> "[ON AIR]"
+                Radio.TUNING -> "[TUNING]"
+                Radio.FAILED -> "[NO SIGNAL]"
+                else -> s.note
+            } else s.note
+            row.bind(s.name, note)
+            return row
+        }
+    }
+
+    private val stationAdapter = StationAdapter()
+
     // ---------------------------------------------------------------- in-terminal menu
 
     private fun showMenu(title: String, items: List<Pair<String, () -> Unit>>) {
@@ -816,8 +1076,9 @@ class MainActivity : Activity() {
     companion object {
         const val HOME = 0
         const val APPS = 1
-        const val STAT = 2
-        const val CONF = 3
+        const val RADIO = 2
+        const val STAT = 3
+        const val CONF = 4
 
         /** Which screen to reopen on after the activity rebuilds itself for a colour change. */
         var pendingTab = HOME

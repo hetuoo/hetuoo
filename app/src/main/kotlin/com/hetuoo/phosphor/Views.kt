@@ -84,7 +84,12 @@ class RowView(ctx: Context) : View(ctx) {
 }
 
 /** The row of screen names across the top; the active one sits in a notch on the rule. */
-class TabBar(ctx: Context, private val names: Array<String>) : View(ctx) {
+class TabBar(
+    ctx: Context,
+    private val names: Array<String>,
+    sizeSp: Float = 27f,
+    private val heightDp: Float = 58f,
+) : View(ctx) {
     var selected = 0
         set(v) {
             field = v
@@ -92,14 +97,14 @@ class TabBar(ctx: Context, private val names: Array<String>) : View(ctx) {
         }
     var onSelect: ((Int) -> Unit)? = null
 
-    private val text = Term.paint(27f)
+    private val text = Term.paint(sizeSp)
     private val line = Paint().apply {
         color = Term.shade(0.7f)
         strokeWidth = Term.dp(1.5f)
     }
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-        setMeasuredDimension(getDefaultSize(suggestedMinimumWidth, widthSpec), Term.dp(58f).toInt())
+        setMeasuredDimension(getDefaultSize(suggestedMinimumWidth, widthSpec), Term.dp(heightDp).toInt())
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -120,8 +125,8 @@ class TabBar(ctx: Context, private val names: Array<String>) : View(ctx) {
             }
             canvas.drawText(names[i], cx - tw / 2, baseline, text)
             if (on) {
-                val l = cx - tw / 2 - Term.dp(10f)
-                val r = cx + tw / 2 + Term.dp(10f)
+                val l = (cx - tw / 2 - Term.dp(10f)).coerceAtLeast(cell * i + Term.dp(1f))
+                val r = (cx + tw / 2 + Term.dp(10f)).coerceAtMost(cell * (i + 1) - Term.dp(1f))
                 val tick = Term.dp(12f)
                 canvas.drawLine(0f, rule, l, rule, line)
                 canvas.drawLine(r, rule, width.toFloat(), rule, line)
@@ -135,8 +140,12 @@ class TabBar(ctx: Context, private val names: Array<String>) : View(ctx) {
         }
     }
 
+    private var downX = 0f
+
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (e.action == MotionEvent.ACTION_UP) {
+        if (e.action == MotionEvent.ACTION_DOWN) downX = e.x
+        // A swipe that happens to start on the bar is a screen gesture, not a tab press.
+        if (e.action == MotionEvent.ACTION_UP && kotlin.math.abs(e.x - downX) < Term.dp(24f)) {
             val i = (e.x / (width / names.size.toFloat())).toInt().coerceIn(0, names.size - 1)
             onSelect?.invoke(i)
         }
@@ -160,6 +169,13 @@ class ClockView(ctx: Context) : View(ctx) {
                 invalidate()
             }
         }
+
+    /** Called with [TIME], [DATE] or [POWER] when that part of the readout is tapped. */
+    var onZone: ((Int) -> Unit)? = null
+    private var dateTop = 0f
+    private var powerTop = 0f
+    private var downX = 0f
+    private var downY = 0f
 
     private val time = Term.paint(100f)
     private val small = Term.paint(24f)
@@ -190,10 +206,12 @@ class ClockView(ctx: Context) : View(ctx) {
         canvas.drawText(clock, cx - tw / 2, y, time)
         if (suffix.isNotEmpty()) canvas.drawText(suffix, cx + tw / 2 + Term.dp(6f), y, small)
 
+        dateTop = y + Term.dp(4f)
         y += Term.dp(10f) + small.textSize
         val date = dateFmt.format(now).uppercase()
         canvas.drawText(date, cx - small.measureText(date) / 2, y, small)
 
+        powerTop = y + Term.dp(8f)
         y += Term.dp(16f) + small.textSize
         val pad = Term.dp(18f)
         canvas.drawText("PWR", pad, y, dim)
@@ -204,6 +222,29 @@ class ClockView(ctx: Context) : View(ctx) {
         val r = width - pad - pw - Term.dp(12f)
         val bh = small.textSize * 0.55f
         Term.drawSegments(canvas, bar, l, y - bh, r - l, bh, battery / 100f, 24)
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = e.x
+                downY = e.y
+            }
+            MotionEvent.ACTION_UP -> {
+                // Only a tap counts; swipes that start here belong to the screen gestures.
+                val slop = Term.dp(12f)
+                if (kotlin.math.abs(e.x - downX) < slop && kotlin.math.abs(e.y - downY) < slop) {
+                    onZone?.invoke(if (e.y >= powerTop) POWER else if (e.y >= dateTop) DATE else TIME)
+                }
+            }
+        }
+        return true
+    }
+
+    companion object {
+        const val TIME = 0
+        const val DATE = 1
+        const val POWER = 2
     }
 }
 
@@ -288,5 +329,33 @@ class ScopeView(ctx: Context) : View(ctx) {
         }
         canvas.drawPath(path, trace)
         if (running) postInvalidateDelayed(33)
+    }
+}
+
+/** A carrier-level meter for the radio: dances while a station is on air, idles otherwise. */
+class VuView(ctx: Context) : View(ctx) {
+    var running = false
+        set(v) {
+            field = v
+            invalidate()
+        }
+
+    private val bar = Paint()
+    private var level = 0f
+
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        setMeasuredDimension(getDefaultSize(suggestedMinimumWidth, widthSpec), Term.dp(14f).toInt())
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (running) {
+            val t = SystemClock.uptimeMillis() / 1000f
+            val target = 0.62f + 0.2f * sin(t * 5.3f) + 0.12f * sin(t * 13.1f) + 0.06f * sin(t * 29f)
+            level += (target - level) * 0.35f
+        } else {
+            level = 0f
+        }
+        Term.drawSegments(canvas, bar, 0f, 0f, width.toFloat(), height.toFloat(), level, 32)
+        if (running) postInvalidateDelayed(60)
     }
 }

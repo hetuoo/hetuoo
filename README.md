@@ -9,16 +9,24 @@ chunky terminal font, scanlines, and synthesized tactile clicks.
 |------|--------------|
 | HOME | Big clock, date, battery meter, your pinned apps, and a search prompt at the bottom |
 | APPS | Every installed app in a list, with a search bar at the bottom (Enter launches the top match) |
+| RADIO | Internet radio by decade (40s to 80s, plus soul). Keeps playing while you use other apps |
 | STAT | Battery, memory, storage, uptime and device readouts |
-| CONF | Phosphor colour (green / amber / ice / paper), scanlines, flicker, icons, sound, haptics |
+| CONF | Phosphor colour (green / amber / ice / paper), scanlines, flicker, status bar, icons, sound, switch sound, haptics |
 
 ## Gestures
 
 - Swipe left / right: switch tabs
 - Swipe up on HOME: all apps. Swipe down on APPS (at the top of the list): back home
 - Swipe down on HOME: notifications
+- Tap the clock for the clock app, the date for the calendar, the battery meter for battery settings
 - Long-press an app under APPS: pin to home, app info, uninstall
 - Long-press a pinned app on HOME: reorder or unpin
+
+## Radio
+
+Each decade lists a few built-in SomaFM presets, then the most popular working
+stations for that decade from the community [Radio Browser](https://www.radio-browser.info)
+directory, refreshed when you open the tab and saved for offline starts.
 
 ## Install
 
